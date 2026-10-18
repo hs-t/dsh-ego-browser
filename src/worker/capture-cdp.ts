@@ -7,6 +7,8 @@ interface Session {
   viewportH: number | null
   /** window.devicePixelRatio; captureScreenshot scales clip output by it. */
   dpr: number
+  /** document.visibilityState === 'visible' for this target. */
+  documentVisible: boolean
 }
 
 interface JpegFrame {
@@ -40,7 +42,7 @@ export class TargetSessions {
     if (this.sessions.has(targetId)) return this.sessions.get(targetId)!
     const result = await this.cdp.call('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
     if (!result.sessionId) throw new Error(`CDP did not return a session for ${targetId}`)
-    const session: Session = { targetId, sessionId: result.sessionId, viewportW: null, viewportH: null, dpr: 1 }
+    const session: Session = { targetId, sessionId: result.sessionId, viewportW: null, viewportH: null, dpr: 1, documentVisible: true }
     this.sessions.set(targetId, session)
     await Promise.allSettled([
       this.cdp.call('Page.enable', {}, session.sessionId),
@@ -73,11 +75,15 @@ export class TargetSessions {
       // The screencast is capped in device pixels (maxWidth), so the backstop
       // must divide by devicePixelRatio to produce a frame of the same size.
       const evaluated = await this.cdp.call('Runtime.evaluate', {
-        expression: 'window.devicePixelRatio',
+        expression: 'JSON.stringify({ dpr: window.devicePixelRatio, visibility: document.visibilityState })',
         returnByValue: true,
       }, session.sessionId) as { result?: { value?: unknown } } | undefined
-      const dpr = Number(evaluated?.result?.value)
-      if (Number.isFinite(dpr) && dpr > 0) session.dpr = dpr
+      try {
+        const info = JSON.parse(String(evaluated?.result?.value ?? '{}')) as { dpr?: unknown; visibility?: unknown }
+        const dpr = Number(info.dpr)
+        if (Number.isFinite(dpr) && dpr > 0) session.dpr = dpr
+        session.documentVisible = info.visibility === 'visible'
+      } catch { /* ignore */ }
     } catch { /* ignore */ }
     return session
   }
@@ -308,16 +314,22 @@ export class CdpCaptureBackend {
       if (this.now() - current.lastFrameAt >= interval) {
         try {
           const session = await this.sessions.updateViewport(current.targetId)
-          const maxWidth = this.getConfig().cdpMaxWidth
-          const dpr = session.dpr > 0 ? session.dpr : 1
-          const scale = session.viewportW ? Math.min(1, maxWidth / (session.viewportW * dpr)) : 1
-          const result = await this.cdp.call('Page.captureScreenshot', {
-            format: 'jpeg',
-            quality: this.getConfig().cdpQuality,
-            captureBeyondViewport: false,
-            ...(session.viewportW && session.viewportH ? { clip: { x: 0, y: 0, width: session.viewportW, height: session.viewportH, scale } } : {}),
-          }, current.sessionId) as { data?: string }
-          if (result.data) this.onJpegFrame({ targetId: current.targetId, data: result.data, vw: session.viewportW, vh: session.viewportH, ts: this.now(), backstop: true })
+          // A visible target is already streamed by Page.startScreencast. A
+          // backstop capture resizes the renderer surface on HiDPI, which the
+          // user sees as a brief half-scale frame in the browser window (the
+          // 20s flash). Only capture targets whose document is hidden.
+          if (!session.documentVisible) {
+            const maxWidth = this.getConfig().cdpMaxWidth
+            const dpr = session.dpr > 0 ? session.dpr : 1
+            const scale = session.viewportW ? Math.min(1, maxWidth / (session.viewportW * dpr)) : 1
+            const result = await this.cdp.call('Page.captureScreenshot', {
+              format: 'jpeg',
+              quality: this.getConfig().cdpQuality,
+              captureBeyondViewport: false,
+              ...(session.viewportW && session.viewportH ? { clip: { x: 0, y: 0, width: session.viewportW, height: session.viewportH, scale } } : {}),
+            }, current.sessionId) as { data?: string }
+            if (result.data) this.onJpegFrame({ targetId: current.targetId, data: result.data, vw: session.viewportW, vh: session.viewportH, ts: this.now(), backstop: true })
+          }
         } catch { /* ignore */ }
       }
       this.#scheduleBackstop()
