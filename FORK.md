@@ -47,3 +47,16 @@ Chromium build outside the standard Chrome/Edge/Brave locations.
   Sidebar (`ui-sidebar-right`) as a keep-mounted tab type, with automatic
   opening when the agent calls an `ego_*` tool. Fallback order:
   built-in right Sidebar → `dsh-better-sidebar` → floating watch ball.
+- Windows HiDPI: `runtime/ego-linux/src/chrome.mjs` no longer passes
+  `--force-device-scale-factor=1` on win32. Windows follows the system scale
+  (`dpr=2` here) while `--window-size=1280,900` still yields a ~1267 CSS
+  viewport.
+- Stable live view: `src/client/index.ts` skips keepalive `spaces` re-renders
+  when the rendered payload is unchanged, derives the "live" title from
+  `streamState` instead of the rolling `lastActive` window, and reserves the
+  page aspect ratio on the live image so a frame swap cannot collapse it.
+- CDP backstop: `src/worker/capture-cdp.ts` divides the backstop clip scale by
+  `devicePixelRatio` (the screencast is capped in device pixels) and skips
+  `Page.captureScreenshot` for targets whose document is visible. The capture
+  briefly rescales a HiDPI renderer surface, which showed up as a 20-second
+  half-scale flash in the browser window.
