@@ -159,6 +159,7 @@ declare function require(id: string): any
 		var watchEn = {
 			title: 'Agent Browser',
 			titleLive: 'Agent Browser · Live',
+			watchDesc: 'Watch and take over the agent browser live',
 			liveView: 'Live view',
 			pinned: 'Pinned',
 			realtime: 'Live',
@@ -205,6 +206,7 @@ declare function require(id: string): any
 		var watchZh = {
 			title: 'Agent 浏览器',
 			titleLive: 'Agent 浏览器 · 实时',
+			watchDesc: '实时查看并接管 Agent 浏览器',
 			liveView: '只读观察窗',
 			pinned: '已固定查看',
 			realtime: '正在实时浏览',
@@ -1394,6 +1396,10 @@ declare function require(id: string): any
 		// 6-dot drag grip for the panel's title bar.
 		const ICON_GRIP = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="8" cy="6" r="1.8"/><circle cx="16" cy="6" r="1.8"/><circle cx="8" cy="12" r="1.8"/><circle cx="16" cy="12" r="1.8"/><circle cx="8" cy="18" r="1.8"/><circle cx="16" cy="18" r="1.8"/></svg>`;
 
+		function serviceGet(ctx, name) {
+			try { return typeof ctx.get === 'function' ? ctx.get(name) : undefined } catch (e) { return undefined }
+		}
+
 		function apply(ctx) {
 			// ── Settings card: register locale + slot (always runs) ──────
 			ctx.effect(() => ctx.locale.register(SETTINGS_NS, { zh, en }), 'ego-browser: settings dictionaries')
@@ -1459,31 +1465,39 @@ declare function require(id: string): any
 				}, EgoBrowserCard)
 			})
 
-		// ── Watch panel: sidebar tab & floating watch ─────────────────────
-		// betterSidebar is an OPTIONAL service and is intentionally absent from
-		// the static inject list (see its declaration above): on hosts without
-		// dsh-better-sidebar the module loader would otherwise keep this row
-		// pending forever and block the whole web boot (issue #29, reproduced
-		// on DSH 0.1.2-rc.1). Probe with ctx.get; when absent, mount the
-		// floating watch panel immediately and upgrade to the sidebar tab if
-		// the service appears later (dynamic ctx.inject, same pattern as PR #45).
-		var betterSidebarService
-		try { betterSidebarService = typeof ctx.get === 'function' ? ctx.get('betterSidebar') : undefined } catch (e) { betterSidebarService = undefined }
-		if (betterSidebarService !== undefined) {
-			ctx.effect(() => mountSidebarTab(ctx, betterSidebarService), 'ego-browser sidebar tab')
+		// ── Watch panel: built-in right Sidebar → betterSidebar → floating ──
+		// The built-in right Sidebar (DSH >= 0.2) is the preferred host: it
+		// provides per-session tabs, docking, fullscreen and keepMounted, and is
+		// the same seat the shipped Browser/Files/Terminal tabs use. Neither
+		// sidebar service is in the static inject list (a host without them must
+		// still boot and fall back), so probe with ctx.get and upgrade through a
+		// dynamic inject when the service appears.
+		var rightSidebarService = serviceGet(ctx, 'sidebarRight')
+		var rightSidebarTabsService = serviceGet(ctx, 'sidebarRightTabs')
+		var betterSidebarService = serviceGet(ctx, 'betterSidebar')
+		if (rightSidebarService && rightSidebarTabsService) {
+			ctx.effect(function () {
+				return mountRightSidebarTab(ctx, rightSidebarService, rightSidebarTabsService)
+			}, 'ego-browser right sidebar')
+		} else if (betterSidebarService !== undefined) {
+			ctx.effect(function () {
+				return mountSidebarTab(ctx, betterSidebarService)
+			}, 'ego-browser sidebar tab')
 		} else {
 			var disposeFloating = null
-			ctx.effect(() => {
+			ctx.effect(function () {
 				disposeFloating = mountFloatingWatch(ctx)
 				return function () { if (disposeFloating) { var d = disposeFloating; disposeFloating = null; d() } }
 			}, 'ego-browser watch panel')
 			if (typeof ctx.inject === 'function') {
-				ctx.inject(['betterSidebar'], function (sidebarCtx) {
-					var svc
-					try { svc = typeof sidebarCtx.get === 'function' ? sidebarCtx.get('betterSidebar') : sidebarCtx.betterSidebar } catch (e) { svc = undefined }
-					if (!svc) return
-					if (disposeFloating) { var d2 = disposeFloating; disposeFloating = null; d2() }
-					sidebarCtx.effect(function () { return mountSidebarTab(sidebarCtx, svc) }, 'ego-browser sidebar tab')
+				ctx.inject(['sidebarRight', 'sidebarRightTabs'], function (sidebarCtx) {
+					var svc = serviceGet(sidebarCtx, 'sidebarRight')
+					var tabs = serviceGet(sidebarCtx, 'sidebarRightTabs')
+					if (!svc || !tabs) return
+					if (disposeFloating) { var d = disposeFloating; disposeFloating = null; d() }
+					sidebarCtx.effect(function () {
+						return mountRightSidebarTab(sidebarCtx, svc, tabs)
+					}, 'ego-browser right sidebar')
 				})
 			}
 		}
@@ -2734,6 +2748,31 @@ clearTimeout((panel as any)._dshHideT)
 .dsh-ego-side-hnone { padding: 16px 8px; text-align: center; font-size: 10.5px; opacity: .4; }
 `
 
+		// ── Built-in right Sidebar (DSH >= 0.2) ────────────────────────────────
+		// The right Sidebar (ui-sidebar-right) exposes a tab-type registry and a
+		// keyed body seat. This is the native analogue of dsh-better-sidebar's
+		// Tab: per-session, dockable, fullscreen, floating, and keepMounted. The
+		// id is both the implementation identity and the keyed-slot dispatch
+		// key; the kind is the page type the navigation controller opens. Both
+		// are namespaced so they cannot collide with browser/files/terminal.
+		var WATCH_TAB_ID = 'dsh-ego-browser/watch'
+		var WATCH_TAB_KIND = 'ego-browser:watch'
+		var TAB_STYLE_ID = 'dsh-ego-tab-css'
+
+		/** Inject TAB_CSS once per document; the effect removes it on dispose. */
+		function ensureTabCss(ctx) {
+			ctx.effect(function () {
+				if (typeof document === 'undefined') return
+				if (document.getElementById(TAB_STYLE_ID) !== null) return
+				var tag = document.createElement('style')
+				tag.id = TAB_STYLE_ID
+				tag.dataset.plugin = 'ego-browser'
+				tag.textContent = TAB_CSS
+				document.head.appendChild(tag)
+				return function () { tag.remove() }
+			}, 'ego-browser: tab css')
+		}
+
 		// ── LivePreviewController ───────────────────────────────────────────────
 		// Vanilla class holding all mutable watch state + SSE/poll/input/zoom
 		// logic. Extracted from the floating panel's imperative DOM code so the
@@ -3711,59 +3750,29 @@ clearTimeout((panel as any)._dshHideT)
 		}
 
 		// ── mountSidebarTab: register the ego-browser watch tab ────────────────
-		function mountSidebarTab(ctx, betterSidebar) {
-			if (!betterSidebar) return function () {}
-			// Inject Tab CSS once (cleaned up on dispose)
-			var styleEl = document.createElement('style')
-			styleEl.textContent = TAB_CSS
-			document.head.appendChild(styleEl)
-
-			var disposeTab = betterSidebar.registerTab({
-				id: 'ego-browser:watch',
-				title: function () { return wt('title') },
-				order: 70,
-				single: true,
-				// No urlTarget: this tab is a live screencast of the AGENT
-				// browser, not a renderer for arbitrary URLs. Claiming http(s)
-				// links here stole every chat link from the built-in browser
-				// tab and dead-ended on the empty state (issue #48).
-				component: EgoBrowserTab,
-			})
-
-			// ── Auto-open probe (SSE-driven, no polling) ─────────────────────
-			// Listens for `tool-call` events on the SSE stream to detect when
-			// the agent first calls an ego_* tool, then opens the sidebar Tab.
-			// No /api/ego/spaces polling — the host-side markEgoToolCall()
-			// pushes the event into the SSE stream the moment a tool runs.
-			//
-			// Why "increase beyond baseline" not "0 → >0": toolCallCount is a
-			// host-process counter that persists across page reloads. The
-			// baseline is fetched ONCE at mount via a single /api/ego/spaces
-			// request; after that, only a NEW tool call (count goes up)
-			// triggers the open.
-			//
-			// Per-session scope: the event carries the CALLING session id, so the
-			// Tab opens with that session's scope — a background conversation's
-			// tool call lands in ITS OWN sidebar instead of the sidebar the user
-			// happens to be looking at. The one-shot guard is therefore per
-			// session, and the probe stream stays open (a later session must
-			// still be able to auto-open).
+		/**
+		 * Auto-open probe shared by both sidebar hosts.
+		 *
+		 * Listens for `tool-call` events on the SSE stream and calls `openFn`
+		 * once per session when a NEW ego_* call is observed. No polling: the
+		 * host's markEgoToolCall() pushes the event into /api/ego/stream the
+		 * moment a tool runs. The baseline is fetched once, so a counter that
+		 * persisted across page reloads does not re-open on load.
+		 *
+		 * @param openFn - receives the calling session id (may be undefined).
+		 * @returns disposer that closes the probe stream and unsubscribes.
+		 */
+		function startAutoOpenProbe(openFn) {
 			var probeDisposed = false
 			var baseline = null // null = not yet observed; set on first fetch
-			// Sessions whose sidebar already auto-opened this page load. Keyed PER
-			// SESSION: each conversation gets its own one-shot, and the open is scoped to
-			// the CALLING session, so a background conversation's tool call opens the Tab
-			// in ITS OWN sidebar instead of the one the user is looking at.
+			// Sessions whose sidebar already auto-opened this page load. Keyed
+			// per session so each conversation gets its own one-shot.
 			var autoOpened = {}
 			var openWatchTab = function (sessionId) {
 				var key = sessionId || ''
 				if (autoOpened[key] === true) return
 				autoOpened[key] = true
-				try {
-					// The second argument is the session scope; without it the open lands
-					// in whatever sidebar is currently on screen.
-					betterSidebar.openTab({ type: 'ego-browser:watch' }, sessionId ? { sessionId: sessionId } : undefined)
-				} catch (e) {}
+				try { openFn(sessionId) } catch (e) {}
 			}
 			// One-shot baseline fetch (NOT a polling loop). After this, the
 			// SSE `tool-call` event is the sole signal.
@@ -3781,9 +3790,8 @@ clearTimeout((panel as any)._dshHideT)
 					}
 				} catch (e) {}
 			})()
-			// Listen for tool-call events on the shared SSE stream. The probe
-			// opens its OWN EventSource so it works even before the Tab is
-			// mounted (the Tab's controller only connects after the Tab opens).
+			// The probe opens its OWN EventSource so it works even before the tab
+			// is mounted (the tab's controller only connects after the tab opens).
 			// While the frame relay is disabled there is no push channel at all,
 			// so the probe stays CLOSED rather than opening a stream the host
 			// refuses to serve.
@@ -3798,23 +3806,22 @@ clearTimeout((panel as any)._dshHideT)
 				probeSse = null
 			}
 			var onProbeToolCall = function (ev) {
-					if (probeDisposed) return
-					try {
-						var m = JSON.parse(ev.data)
-						if (!m || typeof m.count !== 'number') return
-						var sid = typeof m.sessionId === 'string' && m.sessionId !== '' ? m.sessionId : undefined
-						if (baseline === null) {
-							// Event arrived before the baseline fetch resolved —
-							// treat this count as the baseline (it's the first
-							// we've seen) and open on the NEXT one. But if count
-							// is already >0, the agent has called a tool this
-							// session, so open now.
-							baseline = m.count
-							if (m.count > 0) openWatchTab(sid)
-							return
-						}
-						if (m.count > baseline) openWatchTab(sid)
-					} catch (e) {}
+				if (probeDisposed) return
+				try {
+					var m = JSON.parse(ev.data)
+					if (!m || typeof m.count !== 'number') return
+					var sid = typeof m.sessionId === 'string' && m.sessionId !== '' ? m.sessionId : undefined
+					if (baseline === null) {
+						// Event arrived before the baseline fetch resolved — treat
+						// this count as the baseline and open on the next one. But
+						// if count is already > 0 the agent has called a tool this
+						// session, so open now.
+						baseline = m.count
+						if (m.count > 0) openWatchTab(sid)
+						return
+					}
+					if (m.count > baseline) openWatchTab(sid)
+				} catch (e) {}
 			}
 			openProbeSse()
 			// The settings switch can also flip at runtime; mirror it here.
@@ -3822,14 +3829,108 @@ clearTimeout((panel as any)._dshHideT)
 				if (disabled) closeProbeSse()
 				else openProbeSse()
 			})
-
 			return function () {
 				probeDisposed = true
 				if (offProbeRelay) { try { offProbeRelay() } catch (e) {} }
 				closeProbeSse()
-				disposeTab()
-				styleEl.remove()
 			}
+		}
+
+		/**
+		 * Legacy dsh-better-sidebar host. Kept as the second fallback for hosts
+		 * that ship that third-party service but not the built-in right Sidebar.
+		 * No urlTarget: this tab is a live screencast of the AGENT browser, not a
+		 * renderer for arbitrary URLs (claiming http(s) links stole every chat
+		 * link from the built-in browser tab — issue #48).
+		 */
+		function mountSidebarTab(ctx, betterSidebar) {
+			if (!betterSidebar) return function () {}
+			ensureTabCss(ctx)
+			var disposeTab = betterSidebar.registerTab({
+				id: WATCH_TAB_KIND,
+				title: function () { return wt('title') },
+				order: 70,
+				single: true,
+				component: EgoBrowserTab,
+			})
+			var disposeProbe = startAutoOpenProbe(function (sessionId) {
+				// The second argument is the session scope; without it the open
+				// lands in whatever sidebar is currently on screen.
+				betterSidebar.openTab({ type: WATCH_TAB_KIND }, sessionId ? { sessionId: sessionId } : undefined)
+			})
+			return function () {
+				disposeProbe()
+				disposeTab()
+			}
+		}
+
+		/**
+		 * Built-in right Sidebar host (DSH >= 0.2). Registers a tab type plus
+		 * the keyed body seat and reuses EgoBrowserTab. The tab persists across
+		 * collapse/session switches (keepMounted) and pauses its stream when the
+		 * seat reports it hidden.
+		 *
+		 * @param ctx - context that provides `slots`.
+		 * @param sidebarRight - navigation controller (openTab / mounted).
+		 * @param sidebarRightTabs - tab-type registry.
+		 * @returns disposer for the auto-open probe; the type/body/CSS live on
+		 *   ctx.effect and are released with the plugin fiber.
+		 */
+		function mountRightSidebarTab(ctx, sidebarRight, sidebarRightTabs) {
+			if (!sidebarRight || !sidebarRightTabs) return function () {}
+			ensureTabCss(ctx)
+			ctx.effect(function () {
+				return sidebarRightTabs.register({
+					id: WATCH_TAB_ID,
+					kind: WATCH_TAB_KIND,
+					title: function () { return wt('title') },
+					// Retain the body across tab/session switches and collapse:
+					// rebuilding it would drop the SSE stream and the <video>.
+					keepMounted: true,
+					guide: [{
+						id: 'watch',
+						order: 60,
+						title: function () { return wt('title') },
+						description: function () { return wt('watchDesc') },
+					}],
+				})
+			}, 'ego-browser: right-sidebar tab type')
+			ctx.effect(function () {
+				return ctx.slots.inject('sidebar.right.pane.tab', function () {
+					return ctx.slots.register({
+						name: 'sidebar.right.pane.tab',
+						key: WATCH_TAB_ID,
+						locale: SETTINGS_NS,
+						inject: function () { return { ctx: ctx } },
+					}, RightSidebarWatchBody)
+				})
+			}, 'ego-browser: right-sidebar tab body')
+			return startAutoOpenProbe(function (sessionId) {
+				// The built-in controller only navigates the Session on screen.
+				// Auto-opening for a background Session would land in the wrong
+				// right Sidebar, so skip unless the calling Session is mounted.
+				var mounted
+				try {
+					mounted = sidebarRight.mounted && typeof sidebarRight.mounted.getSnapshot === 'function'
+						? sidebarRight.mounted.getSnapshot()
+						: undefined
+				} catch (e) { mounted = undefined }
+				if (mounted === undefined || mounted === null) return
+				if (sessionId !== undefined && mounted !== sessionId) return
+				sidebarRight.openTab(WATCH_TAB_KIND)
+			})
+		}
+
+		/**
+		 * Body for the built-in right Sidebar's keyed seat. The seat injects
+		 * `useTabInfo` (and other framework hooks); `tab.visible` is the signal
+		 * the controller uses to pause/resume the stream.
+		 */
+		function RightSidebarWatchBody(props) {
+			var info = props && typeof props.useTabInfo === 'function' ? props.useTabInfo() : null
+			var tab = info && info.tab ? info.tab : null
+			var visible = tab && typeof tab.visible === 'boolean' ? tab.visible : true
+			return React.createElement(EgoBrowserTab, { visible: visible, ctx: props.ctx })
 		}
 
 		function escapeHtml(s) {
