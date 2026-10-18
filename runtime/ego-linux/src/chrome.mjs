@@ -43,8 +43,10 @@ const LAUNCH_FLAGS = [
   "--window-size=1280,900",
   // Without this the desktop's HiDPI scaling (1.5x here) shrinks the CSS
   // viewport — a 1280px window lays out as 853px — so page content the agent
-  // expects on screen falls below the fold.
-  "--force-device-scale-factor=1",
+  // expects on screen falls below the fold. On Windows, forcing 1x makes the
+  // window physically half-size on a 200% display (and lets the OS rescale it
+  // periodically), so let Chromium follow the system scale there instead.
+  ...(process.platform === "win32" ? [] : ["--force-device-scale-factor=1"]),
   // "Chrome didn't shut down correctly — Restore pages?". Two things keep it
   // away, covering different halves: the graceful Browser.close in stopBrowser()
   // stops the profile *earning* the mark, and clearStaleCrashMark() clears a
