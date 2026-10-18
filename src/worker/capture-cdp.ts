@@ -5,6 +5,8 @@ interface Session {
   sessionId: string
   viewportW: number | null
   viewportH: number | null
+  /** window.devicePixelRatio; captureScreenshot scales clip output by it. */
+  dpr: number
 }
 
 interface JpegFrame {
@@ -38,7 +40,7 @@ export class TargetSessions {
     if (this.sessions.has(targetId)) return this.sessions.get(targetId)!
     const result = await this.cdp.call('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
     if (!result.sessionId) throw new Error(`CDP did not return a session for ${targetId}`)
-    const session: Session = { targetId, sessionId: result.sessionId, viewportW: null, viewportH: null }
+    const session: Session = { targetId, sessionId: result.sessionId, viewportW: null, viewportH: null, dpr: 1 }
     this.sessions.set(targetId, session)
     await Promise.allSettled([
       this.cdp.call('Page.enable', {}, session.sessionId),
@@ -66,6 +68,16 @@ export class TargetSessions {
       const viewport = result.cssLayoutViewport || result.cssViewport || {}
       if (Number.isFinite(viewport.clientWidth ?? viewport.width)) session.viewportW = (viewport.clientWidth ?? viewport.width!) as number
       if (Number.isFinite(viewport.clientHeight ?? viewport.height)) session.viewportH = (viewport.clientHeight ?? viewport.height!) as number
+      // Page.captureScreenshot applies its clip.scale in CSS pixels but emits
+      // device pixels: on a 2x display a 960 CSS-wide clip comes back 1920 wide.
+      // The screencast is capped in device pixels (maxWidth), so the backstop
+      // must divide by devicePixelRatio to produce a frame of the same size.
+      const evaluated = await this.cdp.call('Runtime.evaluate', {
+        expression: 'window.devicePixelRatio',
+        returnByValue: true,
+      }, session.sessionId) as { result?: { value?: unknown } } | undefined
+      const dpr = Number(evaluated?.result?.value)
+      if (Number.isFinite(dpr) && dpr > 0) session.dpr = dpr
     } catch { /* ignore */ }
     return session
   }
@@ -296,7 +308,9 @@ export class CdpCaptureBackend {
       if (this.now() - current.lastFrameAt >= interval) {
         try {
           const session = await this.sessions.updateViewport(current.targetId)
-          const scale = session.viewportW! > this.getConfig().cdpMaxWidth ? this.getConfig().cdpMaxWidth / session.viewportW! : 1
+          const maxWidth = this.getConfig().cdpMaxWidth
+          const dpr = session.dpr > 0 ? session.dpr : 1
+          const scale = session.viewportW ? Math.min(1, maxWidth / (session.viewportW * dpr)) : 1
           const result = await this.cdp.call('Page.captureScreenshot', {
             format: 'jpeg',
             quality: this.getConfig().cdpQuality,
