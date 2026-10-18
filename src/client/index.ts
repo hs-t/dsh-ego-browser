@@ -2788,6 +2788,9 @@ clearTimeout((panel as any)._dshHideT)
 			this.frameCache = new Map()
 			this.pageMeta = new Map()
 			this.lastList = []
+			// Signature of the last `spaces` payload the view actually rendered;
+			// see _processSpaces. Keeps keepalive events from re-rendering the tab.
+			this._spacesSig = ''
 			this.pinned = null
 			this.currentActiveId = null
 			this.agentActiveId = null
@@ -2906,7 +2909,10 @@ clearTimeout((panel as any)._dshHideT)
 				s.currentTargetId = currentTargetId
 				s.currentSpace = currentSpace
 				s.liveCount = self.liveCount
-				s.busy = self.lastSawActive
+				// "Live" means the relay is connected, not "a frame arrived in
+				// the last 3s": the old lastActive window flipped the header
+				// title and re-rendered the tab on every static-page backstop.
+				s.busy = self.streamState === 'streaming' && self.lastList.length > 0
 				s.showLoginGuide = showLogin
 				s.captchaKind = captchaKind
 				s.historyOpen = self.historyOpen
@@ -3091,6 +3097,18 @@ clearTimeout((panel as any)._dshHideT)
 		LivePreviewController.prototype._processSpaces = function (spaces) {
 			if (this.disposed) return
 			this.lastList = Array.isArray(spaces) ? spaces : []
+			// Keepalive `spaces` events repeat the same metadata twice a second.
+			// Re-rendering the tab on every one of them makes the live image
+			// re-decode and (on the right Sidebar) briefly rescale. Only rebuild
+			// when something the view actually uses changed. `lastActive` is
+			// deliberately excluded: it changes on every frame and used to flip
+			// the header title between "live" and idle every few seconds.
+			var sig = this.lastList.map(function (s) {
+				return [s.targetId, s.url, s.title, s.active === true, s.viewportW, s.viewportH,
+					s.humanCheck && s.humanCheck.detected, s.humanCheck && s.humanCheck.kind].join('\u0001')
+			}).join('\u0002')
+			if (sig === this._spacesSig) return
+			this._spacesSig = sig
 			var self = this
 			for (var i = 0; i < this.lastList.length; i++) {
 				var s = this.lastList[i]
@@ -3114,11 +3132,6 @@ clearTimeout((panel as any)._dshHideT)
 			var activeMarked = this.lastList.find(function (s) { return s.active === true })
 			if (activeMarked) this.agentActiveId = activeMarked.targetId
 			this.liveCount = this.lastList.length
-			// Busy signal: derived from whether any page was touched recently.
-			// Previously this lived in the now-removed polling scheduler; moved
-			// here so the SSE `spaces` event keeps the status dot live.
-			var busy = this.lastList.some(function (s) { return (Date.now() - (s.lastActive || 0)) <= ACTIVE_WINDOW_MS })
-			if (busy !== this.lastSawActive) this.lastSawActive = busy
 			this._recompute()
 		}
 		// Open the pull streams UNLESS the frame relay is disabled. The host's
@@ -3637,9 +3650,15 @@ clearTimeout((panel as any)._dshHideT)
 					)
 				)
 			} else {
+				// Reserve the page's aspect ratio. Without it the <img> box
+				// collapses to zero height while a new src decodes, which the
+				// right Sidebar shows as the whole view shrinking/growing.
+				var liveAspect = currentSpace && Number(currentSpace.viewportW) > 0 && Number(currentSpace.viewportH) > 0
+					? (currentSpace.viewportW + ' / ' + currentSpace.viewportH)
+					: null
 				var liveImg = state.backend === 'ffmpeg'
 					? h('video', {
-						ref: bindLiveVideo, key: 'livevideo-' + state.streamGeneration, className: 'dsh-ego-side-liveimg', muted: true, autoPlay: true, playsInline: true,
+						ref: bindLiveVideo, key: 'livevideo-' + state.streamGeneration, className: 'dsh-ego-side-liveimg', style: liveAspect ? { aspectRatio: liveAspect } : undefined, muted: true, autoPlay: true, playsInline: true,
 						onPointerDown: function (e) { controller.handlePointerDown(e) }, onPointerMove: function (e) { controller.handlePointerMove(e) }, onPointerUp: function (e) { controller.handlePointerUp(e) }, onPointerCancel: function (e) { controller.handlePointerUp(e) }, onDoubleClick: function (e) { controller.handleDoubleClick(e) },
 					})
 					: currentSpace.thumbnail
@@ -3647,6 +3666,7 @@ clearTimeout((panel as any)._dshHideT)
 						ref: bindLiveImg,
 						key: 'liveimg',
 						className: 'dsh-ego-side-liveimg',
+						style: liveAspect ? { aspectRatio: liveAspect } : undefined,
 						src: currentSpace.thumbnail,
 						alt: 'live',
 						draggable: false,
