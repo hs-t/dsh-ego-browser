@@ -60,3 +60,9 @@ Chromium build outside the standard Chrome/Edge/Brave locations.
   `Page.captureScreenshot` for targets whose document is visible. The capture
   briefly rescales a HiDPI renderer surface, which showed up as a 20-second
   half-scale flash in the browser window.
+- Per-session spaces and a space-aware watch panel: `defineEgoTool` derives a
+  default space from `exec.agent.session.id` (explicit `space` wins), and
+  `ego_space_open` rebinds the session to the opened name. The worker enriches
+  tabs with `spaceName` from `task-spaces.json` and publishes `taskSpaces`; the
+  right Sidebar adds a multi-select space dropdown (default: the session's
+  space once it has tabs, otherwise all) and groups the tab strip by space.

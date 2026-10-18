@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -18,6 +19,42 @@ const STATE_HOME = IS_WIN ? process.env.LOCALAPPDATA || join(HOME, 'AppData', 'L
 const STATE_DIR = process.env.EGO_LINUX_STATE_DIR || join(STATE_HOME, 'ego-lite-linux')
 const BROWSER_STATE_FILE = join(STATE_DIR, 'browser.json')
 const CAST_STATE_FILE = join(STATE_DIR, 'ego-cast.json')
+const TASK_SPACE_FILE = join(STATE_DIR, 'task-spaces.json')
+
+interface TaskSpaceSummary { id: number | string; name: string; selected: boolean; tabCount: number; targetIds: string[] }
+let taskSpacesCache: { at: number; spaces: TaskSpaceSummary[] } = { at: 0, spaces: [] }
+
+/**
+ * Read the runtime's task-space table (`task-spaces.json`), which maps each
+ * space to the target ids of its tabs. The worker never writes this file; it
+ * only enriches tabs with the space that owns them and publishes the list for
+ * the watch panel's space filter.
+ */
+async function listTaskSpaces(): Promise<TaskSpaceSummary[]> {
+  const now = Date.now()
+  if (now - taskSpacesCache.at < 1000) return taskSpacesCache.spaces
+  try {
+    const parsed = JSON.parse(await readFile(TASK_SPACE_FILE, 'utf8')) as {
+      spaces?: Array<{ id?: unknown; name?: unknown; targetIds?: unknown }>
+      selectedId?: unknown
+    }
+    const selectedId = parsed.selectedId
+    const spaces = (Array.isArray(parsed.spaces) ? parsed.spaces : [])
+      .filter((space) => space && space.id !== undefined && space.name !== undefined)
+      .map((space) => ({
+        id: space.id as number | string,
+        name: String(space.name),
+        selected: space.id === selectedId,
+        tabCount: Array.isArray(space.targetIds) ? space.targetIds.length : 0,
+        targetIds: Array.isArray(space.targetIds) ? space.targetIds.map(String) : [],
+      }))
+    taskSpacesCache = { at: now, spaces }
+    return spaces
+  } catch {
+    taskSpacesCache = { at: now, spaces: [] }
+    return []
+  }
+}
 
 interface CastConfig {
   captureBackend: string
@@ -268,6 +305,11 @@ async function activeTargetId(): Promise<string | null> {
 async function snapshotSpaces(): Promise<Array<Record<string, unknown>>> {
   const targets = await listTargets()
   const activeId = await activeTargetId()
+  const taskSpaces = await listTaskSpaces()
+  const spaceByTarget = new Map<string, { id: number | string; name: string }>()
+  for (const space of taskSpaces) {
+    for (const targetId of space.targetIds) spaceByTarget.set(targetId, { id: space.id, name: space.name })
+  }
   const spaces: Array<Record<string, unknown>> = []
   for (const target of targets.slice(0, 30)) {
     const frame = frameCache.get(target.targetId)
@@ -277,7 +319,8 @@ async function snapshotSpaces(): Promise<Array<Record<string, unknown>>> {
       active!.sessions.call(target.targetId, 'Runtime.evaluate', { expression: HUMAN_PROBE_JS, returnByValue: true, awaitPromise: false }, 3000)
         .then((result) => { const r = result as { result?: { value?: unknown } }; probeCache.set(target.targetId, { at: Date.now(), human: r.result?.value || null }) }).catch(() => { /* ignore */ })
     }
-    spaces.push({ targetId: target.targetId, url: target.url, title: target.title, active: target.targetId === activeId, lastActive: frame?.lastActive || 0, viewportW: frame?.viewportW || session?.viewportW, viewportH: frame?.viewportH || session?.viewportH, humanCheck: cached?.human || null })
+    const owner = spaceByTarget.get(target.targetId)
+    spaces.push({ targetId: target.targetId, url: target.url, title: target.title, active: target.targetId === activeId, lastActive: frame?.lastActive || 0, viewportW: frame?.viewportW || session?.viewportW, viewportH: frame?.viewportH || session?.viewportH, humanCheck: cached?.human || null, spaceId: owner?.id ?? null, spaceName: owner?.name ?? null })
   }
   spaces.sort((a, b) => Number(b.active) - Number(a.active) || (b.lastActive as number) - (a.lastActive as number))
   return spaces
@@ -366,7 +409,8 @@ async function main(): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     try {
       if (req.method === 'GET' && url.pathname === '/api/health') return sendJson(res, 200, { workerOk: true, browserConnected: !!active, capture: manager.status() })
-      if (req.method === 'GET' && url.pathname === '/api/spaces') return sendJson(res, 200, { ok: true, spaces: active ? await snapshotSpaces() : [], capture: manager.status() })
+      if (req.method === 'GET' && url.pathname === '/api/spaces') return sendJson(res, 200, { ok: true, spaces: active ? await snapshotSpaces() : [], taskSpaces: active ? await listTaskSpaces() : [], capture: manager.status() })
+      if (req.method === 'GET' && url.pathname === '/api/task-spaces') return sendJson(res, 200, { ok: true, taskSpaces: await listTaskSpaces() })
       if (req.method === 'GET' && url.pathname === '/api/watch/status') return sendJson(res, 200, { ok: true, ...manager.status() })
       if (req.method === 'GET' && url.pathname === '/api/video/status') return sendJson(res, 200, { ok: true, ...manager.status(), mime: videoInit?.mime || null })
       if (req.method === 'POST' && url.pathname === '/api/config') { castConfig = normalizeConfig(await readJson(req)); await manager.updateConfig(); return sendJson(res, 200, { ok: true, config: castConfig }) }
@@ -416,6 +460,7 @@ async function main(): Promise<void> {
   const metadataTimer = setInterval(() => {
     if (!active || sseClients.size === 0) return
     snapshotSpaces().then((spaces) => broadcast('spaces', spaces)).catch(() => { /* ignore */ })
+    listTaskSpaces().then((spaces) => broadcast('task-spaces', spaces)).catch(() => { /* ignore */ })
   }, 1000)
   const shutdown = async (): Promise<void> => {
     clearInterval(metadataTimer)

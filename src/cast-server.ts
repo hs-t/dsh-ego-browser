@@ -18,6 +18,7 @@ import type { EgoContext, RegisterRouteOptions, ResolvedConfig, WebServerLike } 
 import type { SettingsBridge } from './settings.ts'
 import type { FfmpegInstallationManager, FfmpegStatus } from './ffmpeg-installation.ts'
 import type { LoginImportOptions, LoginImportReport } from './login-import.ts'
+import { getSessionSpace } from './session-spaces.ts'
 
 const WORKER_BIN = fileURLToPath(new URL('../bin/ego-cast-worker.mjs', import.meta.url))
 
@@ -35,6 +36,8 @@ export const EGO_WATCH_STOP_ROUTE = '/api/ego/watch/stop'
 export const EGO_WATCH_STATUS_ROUTE = '/api/ego/watch/status'
 export const EGO_VIDEO_ROUTE = '/api/ego/video'
 export const EGO_VIDEO_STATUS_ROUTE = '/api/ego/video/status'
+/** Session-scoped default task space, resolved by the host from tool calls. */
+export const EGO_SESSION_SPACE_ROUTE = '/api/ego/session-space'
 
 // ── tool-call signal (auto-open sidebar Tab) ─────────────────────────────
 // Module-level counter bumped by markEgoToolCall() from the tool execute
@@ -617,6 +620,23 @@ export function initCastServer(
     },
   })
 
+  // GET /api/ego/session-space?sessionId=… — the space this DSH session is
+  // currently bound to (set by defineEgoTool / ego_space_open). The watch
+  // panel uses it as the default selection of the space filter. The session id
+  // is a query parameter only because the browser half cannot read the host's
+  // tool-execution context; the host trusts its own map, not the caller.
+  const disposeSessionSpace = server.register({
+    kind: 'exact',
+    path: EGO_SESSION_SPACE_ROUTE,
+    handler: async (reqRaw: unknown, resRaw: unknown) => {
+      const req = reqRaw as IncomingMessage
+      const res = resRaw as ServerResponse
+      const url = new URL(req.url ?? '/', 'http://dsh.internal')
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      return sendJson(res, 200, { ok: true, sessionId, space: getSessionSpace(sessionId) || null })
+    },
+  })
+
   // GET /api/ego/stream — Server-Sent Events: real-time screencast frames and
   // the live tab/spaces list. The web shell supports exact HTTP routes and this
   // handler keeps the connection open for the worker->panel fan-out.
@@ -807,6 +827,7 @@ export function initCastServer(
 
   ctx.effect?.(() => () => {
     try { disposeSpaces() } catch { /* ignore */ }
+    try { disposeSessionSpace() } catch { /* ignore */ }
     try { disposeStream() } catch { /* ignore */ }
     try { disposeInput() } catch { /* ignore */ }
     try { disposeClose() } catch { /* ignore */ }

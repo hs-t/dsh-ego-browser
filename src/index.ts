@@ -40,6 +40,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { importLoginCookies } from './login-import.ts'
 import { initCastServer, markEgoToolCall, getLastEgoActivity } from './cast-server.ts'
+import { defaultSpaceForSession, getSessionSpace, setSessionSpace } from './session-spaces.ts'
 import { EGO_HELP_INDEX } from './help.ts'
 import { HUMAN_CHECK_PROBE } from './captcha.ts'
 import { Config as ConfigSchema, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs } from './config.ts'
@@ -689,18 +690,38 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
     timeoutMs: TOOL_TIMEOUT_MS,
     execute: async (args: Record<string, unknown>, exec: ToolExec) =>
       withEgoLock(async () => {
+        // Structural session identity, never a model-supplied argument. A
+        // session without an explicit space gets a stable default derived from
+        // this id, so two conversations (and subagents) do not share one tab
+        // set. An explicit `space` argument still wins.
+        const sessionId = callingSessionId(exec)
+        const effectiveArgs: Record<string, unknown> = { ...args }
+        if (sessionId !== undefined) {
+          const explicit = typeof args.space === 'string' && args.space !== '' ? args.space : undefined
+          const space = explicit ?? getSessionSpace(sessionId) ?? defaultSpaceForSession(sessionId, String(cfg.defaultSpace))
+          if (space !== undefined && space !== null && space !== '') {
+            setSessionSpace(sessionId, space)
+            if (effectiveArgs.space === undefined || effectiveArgs.space === '') effectiveArgs.space = String(space)
+          }
+        }
         // Signal the client to auto-open the sidebar Tab on the first ego_*
         // tool call. markEgoToolCall() bumps a host-side counter surfaced via
         // /api/ego/spaces; the LivePreviewController transitions on 0 → >0 and
         // calls betterSidebar.openTab(). Idempotent: the client's transition
         // guard means only the first call per session opens the Tab.
-        markEgoToolCall(callingSessionId(exec))
+        markEgoToolCall(sessionId)
         // Stale-space recovery (browser restart wiped the space table) is
         // handled inside runWithStaleSpaceRetry; the cold-start retry is one
         // level deeper.
-        const result = await runWithStaleSpaceRetry(ctx, cfg, exec, () => opts.buildScript(args))
+        const result = await runWithStaleSpaceRetry(ctx, cfg, exec, () => opts.buildScript(effectiveArgs))
         if (!result.ok) throw new Error(result.error)
-        if (typeof opts.afterExecute === 'function') opts.afterExecute(args, result.value)
+        if (sessionId !== undefined && opts.name === 'ego_space_open') {
+          // Opening a named space makes it this session's space from now on.
+          const value = result.value as Record<string, unknown> | null
+          const opened = value && value.name !== undefined ? value.name : effectiveArgs.name
+          setSessionSpace(sessionId, opened)
+        }
+        if (typeof opts.afterExecute === 'function') opts.afterExecute(effectiveArgs, result.value)
         // Value is JSON.parse output of our own payload — fits the tool JSON contract.
         return result.value
       }),
@@ -1180,15 +1201,15 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
   const spaceParam = {
     type: 'string',
     description:
-      'Task-space name or numeric id; defaults to the most recently opened or explicitly selected space.',
+      "Task-space name or numeric id; defaults to this session's space (set by ego_space_open or the first ego_* call).",
   }
   reg(
     t({
       name: 'ego_space_open',
       get description() {
         return cfg.isolateSpaces
-          ? 'Open (or reuse) an ego-lite task space in isolated sandbox mode.'
-          : "Open (or reuse) the ego-lite task space. In persistent profile mode (default), ALWAYS use or reuse the single 'default' space. Login credentials automatically persist on disk across restarts — if a page requires login, prompt user to log in manually in the opened window. DO NOT create numbered spaces like #4, #5."
+          ? 'Open (or reuse) a task space for this session. Each conversation/agent should keep its own named space; reuse the same name for the whole task. This deployment isolates cookies per space (memory-only sandbox, seeded from the default jar at creation).'
+          : 'Open (or reuse) a task space for this session. Each conversation/agent should keep its own named space and reuse the same name for the whole task; do not open a new space for every tool call. Cookies/logins are shared through the persistent disk profile, and tabs are scoped to the space. Pass the same name to every ego_* call (or omit space to use the session default).'
       },
       parameters: {
         name: {
@@ -1196,8 +1217,8 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
           required: true,
           get description() {
             return cfg.isolateSpaces
-              ? 'Task-space name or numeric id.'
-              : "Task-space name. In persistent mode, ALWAYS specify 'default'. Reuse this single space for all browsing tasks."
+              ? "Task-space name, e.g. 'task-<short-id>'. Reuse the same name for this task."
+              : "Task-space name, e.g. 'task-<short-id>'. Reuse the same name for this task; do not create a new space per tool call."
           },
         },
       },

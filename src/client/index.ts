@@ -160,6 +160,13 @@ declare function require(id: string): any
 			title: 'Agent Browser',
 			titleLive: 'Agent Browser · Live',
 			watchDesc: 'Watch and take over the agent browser live',
+			spaceFilter: 'Spaces',
+			allSpaces: 'All spaces',
+			noSpaces: 'No spaces',
+			nSpaces: '{n} spaces',
+			selectAll: 'All',
+			clearAll: 'None',
+			ungrouped: 'Ungrouped',
 			liveView: 'Live view',
 			pinned: 'Pinned',
 			realtime: 'Live',
@@ -207,6 +214,13 @@ declare function require(id: string): any
 			title: 'Agent 浏览器',
 			titleLive: 'Agent 浏览器 · 实时',
 			watchDesc: '实时查看并接管 Agent 浏览器',
+			spaceFilter: '空间',
+			allSpaces: '全部空间',
+			noSpaces: '无空间',
+			nSpaces: '{n} 个空间',
+			selectAll: '全选',
+			clearAll: '清空',
+			ungrouped: '未分组',
 			liveView: '只读观察窗',
 			pinned: '已固定查看',
 			realtime: '正在实时浏览',
@@ -2651,13 +2665,44 @@ clearTimeout((panel as any)._dshHideT)
   background: rgba(255,255,255,.15); text-transform: uppercase; letter-spacing: .3px;
 }
 
-/* ---- tab strip: frosted pills ---- */
+/* ---- space filter (multi-select dropdown) ---- */
+.dsh-ego-side-spacefilter { position: relative; padding: 6px 10px 0; flex-shrink: 0; }
+.dsh-ego-side-filterbtn {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 5px 8px; border-radius: 7px; cursor: pointer; color: inherit;
+  border: 1px solid rgba(128,128,128,.22); background: rgba(128,128,128,.1);
+  font: inherit; font-size: 10.5px; text-align: left;
+}
+.dsh-ego-side-filterbtn:hover { background: rgba(128,128,128,.18); }
+.dsh-ego-side-filterlabel { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .8; }
+.dsh-ego-side-filtercaret { flex: none; opacity: .5; font-size: 9px; }
+.dsh-ego-side-spacedrop {
+  position: absolute; z-index: 30; left: 10px; right: 10px; top: 100%;
+  margin-top: 4px; padding: 6px; border-radius: 9px; max-height: 240px; overflow-y: auto;
+  border: 1px solid rgba(128,128,128,.28); color: inherit;
+  background: var(--dsw-alias-bg-layer-3, #202124);
+  box-shadow: 0 10px 28px rgba(0,0,0,.35);
+}
+.dsh-ego-side-spaceopt { display: flex; align-items: center; gap: 7px; padding: 4px 5px; border-radius: 6px; font-size: 11px; cursor: pointer; }
+.dsh-ego-side-spaceopt:hover { background: rgba(128,128,128,.16); }
+.dsh-ego-side-spaceopt input { margin: 0; flex: none; }
+.dsh-ego-side-spaceopt-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-ego-side-spaceopt-count { flex: none; opacity: .45; font-size: 9.5px; }
+.dsh-ego-side-spacedrop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px; padding-top: 5px; border-top: 1px solid rgba(128,128,128,.16); }
+
+/* ---- tab strip: grouped by space ---- */
 .dsh-ego-side-tabs {
-  display: flex; gap: 5px; padding: 7px 10px; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 6px; padding: 7px 10px; flex-shrink: 0;
   border-bottom: 1px solid rgba(128,128,128,.12);
-  overflow-x: auto; scrollbar-width: thin;
+  max-height: 150px; overflow-y: auto; scrollbar-width: thin;
 }
 .dsh-ego-side-tabs:empty { display: none; }
+.dsh-ego-side-spacegroup { display: flex; flex-direction: column; gap: 4px; }
+.dsh-ego-side-spacehead {
+  font-size: 9.5px; opacity: .45; letter-spacing: .05em; text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dsh-ego-side-spacetabs { display: flex; flex-wrap: wrap; gap: 5px; }
 .dsh-ego-side-tab {
   display: inline-flex; align-items: center; gap: 5px; max-width: 160px;
   white-space: nowrap; padding: 4px 10px; border-radius: 999px; cursor: pointer;
@@ -2791,6 +2836,15 @@ clearTimeout((panel as any)._dshHideT)
 			// Signature of the last `spaces` payload the view actually rendered;
 			// see _processSpaces. Keeps keepalive events from re-rendering the tab.
 			this._spacesSig = ''
+			// Space filter (right Sidebar): all tabs by default; the tab body
+			// binds the DSH session id and narrows this to the session's space
+			// once that space has tabs.
+			this.sessionId = undefined
+			this.taskSpaces = []
+			this.spaceFilter = null
+			this.spaceFilterTouched = false
+			this.sessionSpace = null
+			this._taskSpacesSig = ''
 			this.pinned = null
 			this.currentActiveId = null
 			this.agentActiveId = null
@@ -2837,6 +2891,10 @@ clearTimeout((panel as any)._dshHideT)
 		LivePreviewController.prototype._initialState = function () {
 			return {
 				spaces: [],
+				taskSpaces: [],
+				spaceFilter: null,
+				sessionSpace: null,
+				hasUngrouped: false,
 				pinned: null,
 				selectedTabId: null,
 				currentTargetId: null,
@@ -2861,37 +2919,39 @@ clearTimeout((panel as any)._dshHideT)
 			return this.store.getSnapshot()
 		}
 		LivePreviewController.prototype._recompute = function () {
-			var hasPage = this.lastList.some(function (s) { return s.url && !s.url.startsWith('about:') })
-			var captchaHit = this.lastList.find(function (s) { return s.humanCheck && s.humanCheck.detected })
 			var self = this
+			// The tab strip and the live view render only the spaces selected in
+			// the filter; lastList stays the full browser-wide set so cache
+			// pruning and switching filters keep working.
+			if (this.pinned && !this._visibleTabs().some(function (s) { return s.targetId === self.pinned.targetId })) this.pinned = null
+			if (this.selectedTabId !== null && !this._visibleTabs().some(function (s) { return s.targetId === self.selectedTabId })) this.selectedTabId = null
+			var visible = this._visibleTabs()
+			var hasPage = visible.some(function (s) { return s.url && !s.url.startsWith('about:') })
+			var captchaHit = visible.find(function (s) { return s.humanCheck && s.humanCheck.detected })
+			var withThumb = function (space) {
+				var copy = Object.assign({}, space)
+				if (!copy.thumbnail) {
+					var cached = self.frameCache.get(copy.targetId)
+					if (cached) copy.thumbnail = cached
+				}
+				return copy
+			}
 			var currentSpace = null
 			var currentTargetId = null
 			if (this.pinned) {
-				currentSpace = this.pinned
-				currentTargetId = this.pinned.targetId
-			} else if (this.selectedTabId !== null) {
-				currentSpace = this.lastList.find(function (s) { return s.targetId === self.selectedTabId }) || null
-				currentTargetId = this.selectedTabId
-				// spaces payloads no longer carry thumbnails; pull the latest
-				// cached JPEG from the SSE frame pipeline so the view shows
-				// something instead of "no screenshot yet".
-				if (currentSpace && !currentSpace.thumbnail) {
-					var cached = this.frameCache.get(currentTargetId)
-					if (cached) currentSpace = Object.assign({}, currentSpace, { thumbnail: cached })
+				var pinned = visible.find(function (s) { return s.targetId === self.pinned.targetId })
+				if (pinned) { currentSpace = withThumb(pinned); currentTargetId = pinned.targetId }
+			}
+			if (!currentSpace && this.selectedTabId !== null) {
+				var selected = visible.find(function (s) { return s.targetId === self.selectedTabId })
+				if (selected) { currentSpace = withThumb(selected); currentTargetId = selected.targetId }
+			}
+			if (!currentSpace) {
+				var activeMarked = visible.find(function (s) { return s.active === true })
+				if (!activeMarked && visible.length > 0) {
+					activeMarked = visible.slice().sort(function (a, b) { return (b.lastActive || 0) - (a.lastActive || 0) })[0]
 				}
-			} else {
-				var activeMarked = this.lastList.find(function (s) { return s.active === true })
-				if (!activeMarked && this.lastList.length > 0) {
-					activeMarked = this.lastList.slice().sort(function (a, b) { return (b.lastActive || 0) - (a.lastActive || 0) })[0]
-				}
-				if (activeMarked) {
-					currentSpace = Object.assign({}, activeMarked)
-					currentTargetId = activeMarked.targetId
-					if (!currentSpace.thumbnail) {
-						var cached2 = this.frameCache.get(currentTargetId)
-						if (cached2) currentSpace.thumbnail = cached2
-					}
-				}
+				if (activeMarked) { currentSpace = withThumb(activeMarked); currentTargetId = activeMarked.targetId }
 			}
 			this.currentActiveId = currentTargetId
 			// Wiring watchdog: the live <img>/<video> is bound to this controller by a
@@ -2902,8 +2962,13 @@ clearTimeout((panel as any)._dshHideT)
 			this.wiringStale = currentTargetId != null && this.liveImgTargetId !== currentTargetId
 			var showLogin = hasPage && !captchaHit && !this.dismissedGuides.login
 			var captchaKind = (captchaHit && !this.dismissedGuides.captcha) ? (captchaHit.humanCheck.kind || 'captcha') : null
+			this.liveCount = visible.length
 			this.store.update(function (s) {
-				s.spaces = self.lastList
+				s.spaces = visible
+				s.taskSpaces = self.taskSpaces
+				s.spaceFilter = self.spaceFilter
+				s.sessionSpace = self.sessionSpace
+				s.hasUngrouped = self.lastList.some(function (row) { return !row.spaceName })
 				s.pinned = self.pinned
 				s.selectedTabId = self.selectedTabId
 				s.currentTargetId = currentTargetId
@@ -2912,7 +2977,7 @@ clearTimeout((panel as any)._dshHideT)
 				// "Live" means the relay is connected, not "a frame arrived in
 				// the last 3s": the old lastActive window flipped the header
 				// title and re-rendered the tab on every static-page backstop.
-				s.busy = self.streamState === 'streaming' && self.lastList.length > 0
+				s.busy = self.streamState === 'streaming' && visible.length > 0
 				s.showLoginGuide = showLogin
 				s.captchaKind = captchaKind
 				s.historyOpen = self.historyOpen
@@ -2925,7 +2990,8 @@ clearTimeout((panel as any)._dshHideT)
 				s.streamMime = self.streamMime
 				s.relayDisabled = frameRelayDisabled
 			})
-			this._syncWatch(currentTargetId)
+			if (currentTargetId === null) this._stopWatch(false)
+			else this._syncWatch(currentTargetId)
 		}
 		LivePreviewController.prototype.start = function () {
 			document.addEventListener('visibilitychange', this.onDocumentVisibility)
@@ -2933,6 +2999,7 @@ clearTimeout((panel as any)._dshHideT)
 			// Live settings switch: off tears the pull streams down at once,
 			// back on resumes them without a page reload.
 			this.offRelayWatch = frameRelaySubscribe(function (disabled) { self._onRelayChange(disabled) })
+			this._refreshSessionSpace()
 			this._recompute()
 			if (this.visible) { this.refresh(); this.openStream() }
 		}
@@ -3085,6 +3152,7 @@ clearTimeout((panel as any)._dshHideT)
 					var data = await res.json()
 					if (!data || data.ok !== true) { self._renderEmpty(); return }
 					self._applyCaptureStatus(data.capture)
+					if (data.taskSpaces) self._processTaskSpaces(data.taskSpaces)
 					self._processSpaces(data.spaces)
 				} catch (e) {
 					self._renderEmpty()
@@ -3104,7 +3172,7 @@ clearTimeout((panel as any)._dshHideT)
 			// deliberately excluded: it changes on every frame and used to flip
 			// the header title between "live" and idle every few seconds.
 			var sig = this.lastList.map(function (s) {
-				return [s.targetId, s.url, s.title, s.active === true, s.viewportW, s.viewportH,
+				return [s.targetId, s.url, s.title, s.active === true, s.viewportW, s.viewportH, s.spaceName,
 					s.humanCheck && s.humanCheck.detected, s.humanCheck && s.humanCheck.kind].join('\u0001')
 			}).join('\u0002')
 			if (sig === this._spacesSig) return
@@ -3132,6 +3200,66 @@ clearTimeout((panel as any)._dshHideT)
 			var activeMarked = this.lastList.find(function (s) { return s.active === true })
 			if (activeMarked) this.agentActiveId = activeMarked.targetId
 			this.liveCount = this.lastList.length
+			this._recompute()
+		}
+		/** Tabs of the spaces currently selected in the filter. */
+		LivePreviewController.prototype._visibleTabs = function () {
+			if (this.spaceFilter === null) return this.lastList
+			var filter = this.spaceFilter
+			return this.lastList.filter(function (s) { return filter.indexOf(s.spaceName || '__none__') >= 0 })
+		}
+		/** Every key the filter dropdown can show: space names + ungrouped. */
+		LivePreviewController.prototype._allSpaceKeys = function () {
+			var keys = this.taskSpaces.map(function (s) { return s.name })
+			if (this.lastList.some(function (s) { return !s.spaceName }) && keys.indexOf('__none__') < 0) keys.push('__none__')
+			return keys
+		}
+		/** Unbound session (or a session space with no tabs) shows everything. */
+		LivePreviewController.prototype._defaultSpaceFilter = function () {
+			if (!this.sessionSpace) return null
+			var own = this.taskSpaces.find(function (s) { return s.name === this.sessionSpace }, this)
+			return own && own.tabCount > 0 ? [this.sessionSpace] : null
+		}
+		LivePreviewController.prototype.setSessionId = function (sessionId) {
+			var next = typeof sessionId === 'string' && sessionId !== '' ? sessionId : undefined
+			if (next === this.sessionId) return
+			this.sessionId = next
+			this._refreshSessionSpace()
+		}
+		LivePreviewController.prototype._refreshSessionSpace = function () {
+			if (this.disposed || !this.sessionId) return
+			var self = this
+			fetch('/api/ego/session-space?sessionId=' + encodeURIComponent(this.sessionId), { cache: 'no-store' })
+				.then(function (res) { return res.ok ? res.json() : null })
+				.then(function (data) {
+					if (self.disposed) return
+					var space = data && data.ok === true && typeof data.space === 'string' && data.space !== '' ? data.space : null
+					if (space === self.sessionSpace) return
+					self.sessionSpace = space
+					if (!self.spaceFilterTouched) self.spaceFilter = self._defaultSpaceFilter()
+					self._recompute()
+				}).catch(function () {})
+		}
+		LivePreviewController.prototype._processTaskSpaces = function (list) {
+			if (this.disposed) return
+			var normalized = (Array.isArray(list) ? list : []).filter(function (s) { return s && s.name !== undefined && s.name !== null }).map(function (s) {
+				return { id: s.id, name: String(s.name), selected: s.selected === true, tabCount: Number(s.tabCount) || 0 }
+			})
+			var sig = JSON.stringify(normalized)
+			if (sig === this._taskSpacesSig) return
+			this._taskSpacesSig = sig
+			this.taskSpaces = normalized
+			if (!this.spaceFilterTouched) this.spaceFilter = this._defaultSpaceFilter()
+			this._recompute()
+		}
+		LivePreviewController.prototype.setSpaceFilter = function (keys) {
+			if (this.disposed) return
+			var list = Array.isArray(keys) ? keys.filter(function (key) { return typeof key === 'string' }) : null
+			var all = this._allSpaceKeys()
+			// Selecting everything is equivalent to "all" and keeps the
+			// unbound-session fallback alive.
+			this.spaceFilter = list !== null && all.length > 0 && list.length >= all.length ? null : list
+			this.spaceFilterTouched = true
 			this._recompute()
 		}
 		// Open the pull streams UNLESS the frame relay is disabled. The host's
@@ -3180,6 +3308,15 @@ clearTimeout((panel as any)._dshHideT)
 						self._processSpaces(list)
 					}
 				} catch (e) {}
+			})
+			this.sse.addEventListener('task-spaces', function (ev) {
+				if (self.disposed) return
+				try { self._processTaskSpaces(JSON.parse(ev.data)) } catch (e) {}
+			})
+			this.sse.addEventListener('tool-call', function () {
+				// The host updates its session→space map on the tool-call path;
+				// re-read it so the filter default follows ego_space_open.
+				self._refreshSessionSpace()
 			})
 			this.sse.addEventListener('capture-status', function (ev) {
 				try {
@@ -3474,6 +3611,64 @@ clearTimeout((panel as any)._dshHideT)
 			this.resetZoom()
 		}
 
+		/**
+		 * Multi-select space filter above the tab strip. Selection lives in the
+		 * controller store (`spaceFilter`), so the tab strip and the live view
+		 * filter together; `null` means "all spaces".
+		 */
+		function SpaceFilter(props) {
+			var state = props.state
+			var controller = props.controller
+			var h = React.createElement
+			var openState = React.useState(false)
+			var open = openState[0], setOpen = openState[1]
+			var all = (state.taskSpaces || []).map(function (sp) { return { key: sp.name, label: sp.name, count: sp.tabCount || 0 } })
+			if (state.hasUngrouped && !all.some(function (x) { return x.key === '__none__' })) all.push({ key: '__none__', label: wt('ungrouped'), count: 0 })
+			var selected = state.spaceFilter === null ? all.map(function (x) { return x.key }) : state.spaceFilter
+			var label = state.spaceFilter === null
+				? wt('allSpaces')
+				: selected.length === 0
+					? wt('noSpaces')
+					: selected.length === 1
+						? (all.find(function (x) { return x.key === selected[0] }) || { label: selected[0] }).label
+						: wt('nSpaces', { n: selected.length })
+			var toggle = function (key) {
+				var next = selected.slice()
+				var idx = next.indexOf(key)
+				if (idx >= 0) next.splice(idx, 1)
+				else next.push(key)
+				controller.setSpaceFilter(next)
+			}
+			return h('div', { className: 'dsh-ego-side-spacefilter' },
+				h('button', {
+					className: 'dsh-ego-side-filterbtn', type: 'button', title: wt('spaceFilter'),
+					onClick: function () { setOpen(!open) },
+				},
+					h('span', { className: 'dsh-ego-side-filterlabel' }, wt('spaceFilter') + ': ' + label),
+					h('span', { className: 'dsh-ego-side-filtercaret' }, open ? '▴' : '▾')
+				),
+				open ? h('div', { className: 'dsh-ego-side-spacedrop' },
+					all.length === 0
+						? h('div', { className: 'dsh-ego-side-hnone' }, wt('noSpaces'))
+						: all.map(function (item) {
+							return h('label', { key: item.key, className: 'dsh-ego-side-spaceopt' },
+								h('input', {
+									type: 'checkbox',
+									checked: selected.indexOf(item.key) >= 0,
+									onChange: function () { toggle(item.key) },
+								}),
+								h('span', { className: 'dsh-ego-side-spaceopt-name' }, item.label),
+								item.count ? h('span', { className: 'dsh-ego-side-spaceopt-count' }, String(item.count)) : null
+							)
+						}),
+					h('div', { className: 'dsh-ego-side-spacedrop-actions' },
+						h('button', { type: 'button', className: 'dsh-ego-side-back', onClick: function () { controller.setSpaceFilter(all.map(function (x) { return x.key })) } }, wt('selectAll')),
+						h('button', { type: 'button', className: 'dsh-ego-side-back', onClick: function () { controller.setSpaceFilter([]) } }, wt('clearAll'))
+					)
+				) : null
+			)
+		}
+
 		// ── EgoBrowserTab: React component for the sidebar tab ─────────────────
 		// Renders header + guide strips + tab strip + main live view (or history
 		// overlay). Subscribes to the controller's snapshot store; delegates
@@ -3483,6 +3678,7 @@ clearTimeout((panel as any)._dshHideT)
 		function EgoBrowserTab(props) {
 			var visible = props.visible
 			var ctx = props.ctx
+			var sessionId = props.sessionId
 			var controllerRef = React.useRef(null)
 			if (controllerRef.current === null) controllerRef.current = new LivePreviewController(ctx)
 			var controller = controllerRef.current
@@ -3533,6 +3729,12 @@ clearTimeout((panel as any)._dshHideT)
 			React.useEffect(function () {
 				controller.setVisible(visible)
 			}, [visible, controller])
+
+			// The right Sidebar slot injects the DSH session id; the controller
+			// uses it to ask the host which task space this session owns.
+			React.useEffect(function () {
+				controller.setSessionId(sessionId)
+			}, [sessionId, controller])
 
 			// Attach the live <img> to the controller whenever the target changes
 			React.useEffect(function () {
@@ -3616,28 +3818,54 @@ clearTimeout((panel as any)._dshHideT)
 				guides.push(h(EgoCaptchaGuide, { key: 'captcha', kind: state.captchaKind, controller: controller }))
 			}
 
-			// Tab strip
-			var tabsEl = state.spaces.length > 0
-				? h('div', { className: 'dsh-ego-side-tabs' },
-					state.spaces.map(function (s) {
-						var isActive = s.targetId === state.selectedTabId || (state.selectedTabId === null && s.targetId === state.currentTargetId)
-						return h('div', {
-							key: s.targetId,
-							className: 'dsh-ego-side-tab' + (isActive ? ' active' : ''),
-							title: s.url || '',
-							onClick: function () { controller.selectTab(s.targetId) },
-						},
-							h('span', { className: 'dsh-ego-side-tabdot' }),
-							h('span', { className: 'dsh-ego-side-tabtxt' }, s.title || s.url || wt('newTab')),
-							h('span', {
-								className: 'dsh-ego-side-tabclose',
-								title: wt('closeTab'),
-								onClick: function (e) { e.stopPropagation(); controller.closeTab(s.targetId) },
-							}, '×')
+			// Tab strip, grouped by task space. `state.spaces` is already
+			// filtered to the spaces selected in the dropdown.
+			var tabsEl = null
+			if (state.spaces.length > 0) {
+				var groups = []
+				var byKey: Record<string, { key: string; name: string; tabs: any[] }> = {}
+				for (var gi = 0; gi < state.spaces.length; gi++) {
+					var gs = state.spaces[gi]
+					var gkey = gs.spaceName || '__none__'
+					if (!byKey[gkey]) {
+						byKey[gkey] = { key: gkey, name: gs.spaceName || wt('ungrouped'), tabs: [] }
+						groups.push(byKey[gkey])
+					}
+					byKey[gkey].tabs.push(gs)
+				}
+				var spaceOrder: Record<string, number> = {}
+				for (var ti = 0; ti < state.taskSpaces.length; ti++) spaceOrder[state.taskSpaces[ti].name] = ti
+				groups.sort(function (a, b) {
+					var ai = spaceOrder[a.key] === undefined ? 10000 : spaceOrder[a.key]
+					var bi = spaceOrder[b.key] === undefined ? 10000 : spaceOrder[b.key]
+					return ai - bi || String(a.name).localeCompare(String(b.name))
+				})
+				var renderTab = function (s) {
+					var isActive = s.targetId === state.selectedTabId || (state.selectedTabId === null && s.targetId === state.currentTargetId)
+					return h('div', {
+						key: s.targetId,
+						className: 'dsh-ego-side-tab' + (isActive ? ' active' : ''),
+						title: s.url || '',
+						onClick: function () { controller.selectTab(s.targetId) },
+					},
+						h('span', { className: 'dsh-ego-side-tabdot' }),
+						h('span', { className: 'dsh-ego-side-tabtxt' }, s.title || s.url || wt('newTab')),
+						h('span', {
+							className: 'dsh-ego-side-tabclose',
+							title: wt('closeTab'),
+							onClick: function (e) { e.stopPropagation(); controller.closeTab(s.targetId) },
+						}, '×')
+					)
+				}
+				tabsEl = h('div', { className: 'dsh-ego-side-tabs' },
+					groups.map(function (group) {
+						return h('div', { key: group.key, className: 'dsh-ego-side-spacegroup' },
+							h('div', { className: 'dsh-ego-side-spacehead' }, group.name),
+							h('div', { className: 'dsh-ego-side-spacetabs' }, group.tabs.map(renderTab))
 						)
 					})
 				)
-				: null
+			}
 
 			// Main live view
 			var body
@@ -3717,7 +3945,8 @@ clearTimeout((panel as any)._dshHideT)
 				)
 			}
 
-			return h('div', { className: 'dsh-ego-side-root' }, header, guides, tabsEl, body)
+			var spaceFilterEl = h(SpaceFilter, { state: state, controller: controller })
+			return h('div', { className: 'dsh-ego-side-root' }, header, guides, spaceFilterEl, tabsEl, body)
 		}
 
 		function EgoLoginGuide(props) {
@@ -3921,7 +4150,7 @@ clearTimeout((panel as any)._dshHideT)
 						name: 'sidebar.right.pane.tab',
 						key: WATCH_TAB_ID,
 						locale: SETTINGS_NS,
-						inject: function () { return { ctx: ctx } },
+						inject: function (sessionId) { return { ctx: ctx, sessionId: sessionId } },
 					}, RightSidebarWatchBody)
 				})
 			}, 'ego-browser: right-sidebar tab body')
@@ -3950,7 +4179,7 @@ clearTimeout((panel as any)._dshHideT)
 			var info = props && typeof props.useTabInfo === 'function' ? props.useTabInfo() : null
 			var tab = info && info.tab ? info.tab : null
 			var visible = tab && typeof tab.visible === 'boolean' ? tab.visible : true
-			return React.createElement(EgoBrowserTab, { visible: visible, ctx: props.ctx })
+			return React.createElement(EgoBrowserTab, { visible: visible, ctx: props.ctx, sessionId: props.sessionId })
 		}
 
 		function escapeHtml(s) {
